@@ -5,14 +5,25 @@
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.routers import ROUTERS
+from app.services.battery import BatteryService
 from app.store import store
 
-app = FastAPI(title="通信基站运维管理平台", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # 判定口径更换后，存量蓄电池组按新口径重判一遍，同时把当初实测内阻留底。
+    BatteryService().rejudge_all()
+    yield
+
+
+app = FastAPI(title="通信基站运维管理平台", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

@@ -3,7 +3,7 @@
     <header class="page-head">
       <div>
         <h2>蓄电池组管理</h2>
-        <p class="page-desc">维护蓄电池组，围绕电池组编号、电池类型、额定容量、所属站点做登记、筛选与状态流转。</p>
+        <p class="page-desc">维护蓄电池组，围绕电池组编号、电池类型、额定容量、内阻值做登记、实测留底与单向状态流转。</p>
       </div>
       <div class="page-actions">
         <button class="btn primary" type="button" @click="openCreate">登记蓄电池组</button>
@@ -38,15 +38,17 @@
         <tr v-for="row in rows" :key="String(row.id)">
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
           <td class="row-actions">
-            <button
-              v-for="action in actions"
-              :key="action"
-              class="link"
-              type="button"
-              @click="runAction(action, row)"
-            >
-              {{ action }}
-            </button>
+            <template v-if="actionFor(row.status)">
+              <button
+                class="link"
+                type="button"
+                @click="runAction(actionFor(row.status) as string, row)"
+              >
+                {{ actionFor(row.status) }}
+              </button>
+              <button class="link" type="button" @click="recordMeasurement(row)">登记实测</button>
+            </template>
+            <span v-else class="muted">已更换，流程终结</span>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -63,23 +65,49 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
 type Row = Record<string, string | number | null>
 
+interface ActionPayload {
+  ok: boolean
+  message: string
+  entry?: Row
+}
+
 const ENDPOINT = '/api/battery'
-const columns = ["电池组编号", "电池类型", "额定容量", "所属站点", "放电时长", "内阻值", "投用日期", "电池状态"]
-const actions = ["记录下降", "安排更换", "完成更换"]
-const statuses = ["容量合格", "容量下降", "需更换", "已更换"]
-const stats = [{"label": "合格电池组", "value": 0}, {"label": "下降电池组", "value": 0}, {"label": "需更换电池组", "value": 0}]
+const columns = ["电池组编号", "电池类型", "额定容量", "所属站点", "放电时长", "内阻值", "最近实测日期", "电池状态"]
+// 状态只能 容量合格→容量下降→需更换→已更换 单向推进，每个状态只有一个可执行动作。
+const nextAction: Record<string, string> = {
+  '容量合格': '记录下降',
+  '容量下降': '安排更换',
+  '需更换': '完成更换',
+}
+const statsConfig = [
+  { label: '合格电池组', status: '容量合格' },
+  { label: '下降电池组', status: '容量下降' },
+  { label: '需更换电池组', status: '需更换' },
+  { label: '已更换电池组', status: '已更换' },
+]
 
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const filterFields = ["电池组编号", "电池类型", "额定容量"]
+
+const stats = computed(() =>
+  statsConfig.map((item) => ({
+    label: item.label,
+    value: rows.value.filter((row) => row['电池状态'] === item.status || row.status === item.status).length,
+  })),
+)
+
+function actionFor(status: unknown): string | null {
+  return typeof status === 'string' ? nextAction[status] ?? null : null
+}
 
 function resetFilters() {
   filters.value = {}
@@ -94,15 +122,41 @@ function openCreate() {
   errorMessage.value = '蓄电池组登记入口尚未接入审批流'
 }
 
+async function postPayload(path: string, body: Record<string, unknown>): Promise<ActionPayload> {
+  const response = await request(path, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+  return (await response.json()) as ActionPayload
+}
+
+async function recordMeasurement(row: Row) {
+  errorMessage.value = ''
+  const resistance = window.prompt('请输入本次实测内阻值（mΩ，许可范围 0~100）')
+  if (resistance === null) {
+    return
+  }
+  const ratioInput = window.prompt('可选：输入实测容量占额定容量的比例（0~1，如 0.72），留空跳过')
+  const values: Record<string, string> = { 内阻值: resistance }
+  if (ratioInput && ratioInput.trim()) {
+    values['容量比'] = ratioInput.trim()
+  }
+  const payload = await postPayload(`${ENDPOINT}/${row.id}/measurements`, { values })
+  if (!payload.ok) {
+    errorMessage.value = payload.message
+    return
+  }
+  await reload()
+}
+
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
   try {
-    const response = await request(`${ENDPOINT}/${row.id}/actions`, {
-      method: 'POST',
-      body: JSON.stringify({ action }),
-    })
-    if (!response.ok) {
-      throw new Error('蓄电池组动作未生效，请稍后重试')
+    const payload = await postPayload(`${ENDPOINT}/${row.id}/actions`, { action })
+    if (!payload.ok) {
+      // 后端会点名为拦下（倒回/跳级/已终结），直接呈现，不做静默刷新。
+      errorMessage.value = payload.message
+      return
     }
     await reload()
   } catch (error) {

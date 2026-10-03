@@ -1,4 +1,4 @@
-"""蓄电池组接口：维护蓄电池组，覆盖记录下降、安排更换、完成更换等动作。"""
+"""蓄电池组接口：维护蓄电池组，覆盖实测登记、记录下降、安排更换、完成更换等动作。"""
 from __future__ import annotations
 
 from typing import Any
@@ -30,6 +30,13 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出蓄电池组清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "battery", "total": total, "items": items}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条蓄电池组明细；不存在时给出可读的错误说明。"""
@@ -41,25 +48,27 @@ def get_entry(entry_id: int) -> dict:
 
 @router.post("", response_model=ActionResult)
 def create_entry(payload: EntryPayload) -> ActionResult:
-    """登记一条蓄电池组，缺字段时说明原因而不是静默丢弃。"""
-    entry, missing = service.create_entry(payload.values)
-    if missing:
-        return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
+    """登记一条蓄电池组；内阻或额定容量超出许可范围一律拒收，并点名超的是哪一项。"""
+    entry, errors = service.create_entry(payload.values)
+    if errors:
+        return ActionResult(ok=False, message="；".join(errors))
     return ActionResult(ok=True, message="蓄电池组已登记", entry=entry)
 
 
+@router.post("/{entry_id}/measurements", response_model=ActionResult)
+def add_measurement(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """登记最近一次实测：内阻值留底；同一组结论冲突时以这次实测为准（状态不倒回）。"""
+    entry, errors = service.add_measurement(entry_id, payload.values)
+    if errors:
+        return ActionResult(ok=False, message="；".join(errors))
+    return ActionResult(ok=True, message="实测已登记，更换结论已按最近一次实测更新", entry=entry)
+
+
 @router.post("/{entry_id}/actions", response_model=ActionResult)
-def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条蓄电池组执行记录下降、安排更换、完成更换；不允许的动作会被拦下并说明原因。"""
+def run_action(entry_id: int, payload: EntryPayload) ->ActionResult:
+    """对单条蓄电池组执行动作；只能沿 容量合格→容量下降→需更换→已更换 单向推进。"""
     action = str(payload.values.get("action") or "").strip()
     entry, message = service.run_action(entry_id, action)
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出蓄电池组清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "battery", "total": total, "items": items}
